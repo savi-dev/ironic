@@ -25,10 +25,8 @@ from ironicclient import client as ironic_client
 from ironicclient import exc as ironic_exception
 from oslo.config import cfg
 
-from ironic.nova.virt.ironic import ironic_states
 from nova.compute import power_state
 from nova import exception
-from nova.objects import flavor as flavor_obj
 from nova.openstack.common import excutils
 from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
@@ -37,6 +35,7 @@ from nova.openstack.common import log as logging
 from nova.openstack.common import loopingcall
 from nova.virt import driver as virt_driver
 from nova.virt import firewall
+from ironic.nova.virt.ironic import ironic_states
 
 LOG = logging.getLogger(__name__)
 
@@ -416,8 +415,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         # Set image id, and other driver info so we can pass it down to Ironic
         # use the ironic_driver_fields file to import
-        flavor = flavor_obj.Flavor.get_by_id(context,
-                                             instance['instance_type_id'])
+        flavor = self.virtapi.flavor_get(context, instance['instance_type_id'])
         self._add_driver_fields(node, instance, image_meta, flavor)
 
         #validate we ready to do the deploy
