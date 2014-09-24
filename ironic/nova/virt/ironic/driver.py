@@ -415,7 +415,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         # Set image id, and other driver info so we can pass it down to Ironic
         # use the ironic_driver_fields file to import
-        flavor = self.virtapi.flavor_get(context, instance['instance_type_id'])
+        flavor = self.virtapi.instance_type_get(context, instance['instance_type_id'])
         self._add_driver_fields(node, instance, image_meta, flavor)
 
         #validate we ready to do the deploy
@@ -538,8 +538,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         timer = loopingcall.FixedIntervalLoopingCall(_wait_for_provision_state)
         timer.start(interval=CONF.ironic.api_retry_interval).wait()
 
-    def destroy(self, context, instance, network_info,
-                block_device_info=None):
+    def destroy(self, instance, network_info,
+                block_device_info=None, context=None):
         icli = self._get_client()
         try:
             node = validate_instance_and_node(icli, instance)
