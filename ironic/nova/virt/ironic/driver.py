@@ -673,7 +673,8 @@ class IronicDriver(virt_driver.ComputeDriver):
                     msg = (_("Failed to set the VIF networking for port %s")
                            % pif.uuid)
                     raise exception.NovaException(msg)
-                self._register_port_in_janus(vif)
+                port = icli.port.get(pif.uuid)
+                self._register_port_in_janus(vif, port)
 
     def _unplug_vifs(self, node, instance, network_info):
         LOG.debug(_("unplug: instance_uuid=%(uuid)s vif=%(network_info)s")
@@ -695,23 +696,22 @@ class IronicDriver(virt_driver.ComputeDriver):
                     LOG.warning(msg)
                 except ironic_exception.HTTPBadRequest:
                     pass
-                self._deregister_port_in_janus(vif)
+                port = icli.port.get(pif.uuid)
+                self._deregister_port_in_janus(vif, port)
 
-    def _register_port_in_janus(self, vif):
-        br_name = vif['network']['bridge']
-        datapath_id = self._get_datapath_id(br_name)
-        port_name = 'ovs-tap1'
-        of_port_no = self._get_port_no(port_name)
+    def _register_port_in_janus(self, vif, port):
+        if ('datapath_id' not in port.extra or
+            'of_port_no' not in port.extra):
+            return
+
+        datapath_id = port.extra['datapath_id']
+        of_port_no = port.extra['of_port_no']
         mac_address = vif.get('address', None)
-        try:
-            self._set_port_no_in_external_id(port_name, of_port_no)
-        except:
-            traceback.print_exc()
-            pass
         migrating = vif.get('migrating', False)
         net = vif.get('network')
         subnets = net.get('subnets')
         network_id = net['id']
+
         try:
             self.janus_client.createPort(network_id, datapath_id, of_port_no,
                                          migrating = migrating)
@@ -729,25 +729,19 @@ class IronicDriver(virt_driver.ComputeDriver):
             if res.status != httplib.CONFLICT:
                 raise
 
-    def _deregister_port_in_janus(self, vif):
-        br_name = vif['network']['bridge']
-        datapath_id = self._get_datapath_id(br_name)
-        port_name = 'ovs-tap1'
-        try:
-            of_port_no = self._get_port_no(port_name)
-        except:
-            of_port_no = -1
-            pass
+    def _deregister_port_in_janus(self, vif, port):
         mac_address = vif.get('address', None)
         net = vif.get('network')
         subnets = net.get('subnets')
         network_id = net['id']
         migrated = vif.get('migrated', False)
 
-        if of_port_no != -1 and migrated is False:
+        if ('datapath_id' in port.extra and 'of_port_no' in port.extra and
+            migrated is False):
             try:
-                self.janus_client.deletePort(network_id, datapath_id,
-                                             of_port_no)
+                self.janus_client.deletePort(network_id,
+                                             port.extra['datapath_id'],
+                                             port.extra['of_port_no'])
             except httplib.HTTPException as e:
                 res = e.args[0]
                 if res.status != httplib.NOT_FOUND:
@@ -762,21 +756,6 @@ class IronicDriver(virt_driver.ComputeDriver):
                 if res.status != httplib.NOT_FOUND:
                     traceback.print_exc()
                     raise
-
-    def _get_datapath_id(self, bridge_name):
-        out, _err = utils.execute('ovs-vsctl', 'get', 'Bridge',
-                                  bridge_name, 'datapath_id', run_as_root = True)
-        return out.strip().strip('"')
-
-    def _get_port_no(self, dev):
-        out, _err = utils.execute('ovs-vsctl', 'get', 'Interface', dev,
-                                  'ofport', run_as_root = True)
-        return int(out.strip())
-
-    def _set_port_no_in_external_id(self, dev, of_port):
-        out, _err = utils.execute('ovs-vsctl', 'set', 'Interface', dev,
-                                  'external-ids:ofport=%s' % of_port, run_as_root = True)
-        return
 
     def plug_vifs(self, instance, network_info):
         icli = self._get_client()
