@@ -392,8 +392,21 @@ class IronicDriver(virt_driver.ComputeDriver):
             node = icli.node.get(instance['node'])
         except ironic_exception.HTTPNotFound:
             return []
-        ports = icli.node.list_ports(node.uuid)
+        ports = self._list_ports(node)
         return [p.address for p in ports]
+
+    def _list_ports(self, node):
+        icli = self._get_client()
+        all_ports = [icli.port.get(p.uuid)
+                     for p in icli.node.list_ports(node.uuid)]
+        ports = []
+        for i in range(len(all_ports)):
+            if_name = "eth" + str(i)
+            for p in all_ports:
+                if ('if_name' in p.extra and p.extra['if_name'] == if_name):
+                    ports.append(p)
+                    break
+        return ports
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, network_info=None, block_device_info=None):
@@ -647,7 +660,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         self._unplug_vifs(node, instance, network_info)
 
         icli = self._get_client()
-        ports = icli.node.list_ports(node.uuid)
+        ports = self._list_ports(node)
 
         if len(network_info) > len(ports):
             raise exception.NovaException(_(
@@ -673,15 +686,14 @@ class IronicDriver(virt_driver.ComputeDriver):
                     msg = (_("Failed to set the VIF networking for port %s")
                            % pif.uuid)
                     raise exception.NovaException(msg)
-                port = icli.port.get(pif.uuid)
-                self._register_port_in_janus(vif, port)
+                self._register_port_in_janus(vif, pif)
 
     def _unplug_vifs(self, node, instance, network_info):
         LOG.debug(_("unplug: instance_uuid=%(uuid)s vif=%(network_info)s")
                   % {'uuid': instance['uuid'], 'network_info': network_info})
         if network_info and len(network_info) > 0:
             icli = self._get_client()
-            ports = icli.node.list_ports(node.uuid)
+            ports = self._list_ports(node)
 
             # not needed if no vif are defined
             for vif, pif in zip(network_info, ports):
@@ -696,8 +708,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                     LOG.warning(msg)
                 except ironic_exception.HTTPBadRequest:
                     pass
-                port = icli.port.get(pif.uuid)
-                self._deregister_port_in_janus(vif, port)
+                self._deregister_port_in_janus(vif, pif)
 
     def _register_port_in_janus(self, vif, port):
         if ('datapath_id' not in port.extra or
