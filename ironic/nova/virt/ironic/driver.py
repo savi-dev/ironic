@@ -21,14 +21,16 @@ A driver wrapping the Ironic API, such that Nova may provision
 bare metal resources.
 """
 
+import httplib
+import traceback
+
 from ironicclient import client as ironic_client
 from ironicclient import exc as ironic_exception
 from oslo.config import cfg
 
-from ironic.nova.virt.ironic import ironic_states
 from nova.compute import power_state
 from nova import exception
-from nova.objects import flavor as flavor_obj
+from nova import utils
 from nova.openstack.common import excutils
 from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
@@ -37,6 +39,8 @@ from nova.openstack.common import log as logging
 from nova.openstack.common import loopingcall
 from nova.virt import driver as virt_driver
 from nova.virt import firewall
+from ironic.nova.virt.ironic import ironic_states
+from janus.network.network_driver import JanusNetworkDriver
 
 LOG = logging.getLogger(__name__)
 
@@ -81,6 +85,7 @@ ironic_group = cfg.OptGroup(name='ironic',
 CONF = cfg.CONF
 CONF.register_group(ironic_group)
 CONF.register_opts(opts, ironic_group)
+CONF.import_opt('libvirt_ovs_janus_api_host', 'nova.virt.libvirt.vif')
 
 _FIREWALL_DRIVER = "%s.%s" % (firewall.__name__,
                               firewall.NoopFirewallDriver.__name__)
@@ -161,6 +166,8 @@ class IronicDriver(virt_driver.ComputeDriver):
             extra_specs[keyval[0]] = keyval[1]
 
         self.extra_specs = extra_specs
+        host, port = CONF.libvirt_ovs_janus_api_host.split(':')
+        self.janus_client = JanusNetworkDriver(host, port)
 
     def _retry_if_service_is_unavailable(self, func, *args):
         """Rety the request if the API returns 409 (Conflict)."""
@@ -385,8 +392,21 @@ class IronicDriver(virt_driver.ComputeDriver):
             node = icli.node.get(instance['node'])
         except ironic_exception.HTTPNotFound:
             return []
-        ports = icli.node.list_ports(node.uuid)
+        ports = self._list_ports(node)
         return [p.address for p in ports]
+
+    def _list_ports(self, node):
+        icli = self._get_client()
+        all_ports = [icli.port.get(p.uuid)
+                     for p in icli.node.list_ports(node.uuid)]
+        ports = []
+        for i in range(len(all_ports)):
+            if_name = "eth" + str(i)
+            for p in all_ports:
+                if ('if_name' in p.extra and p.extra['if_name'] == if_name):
+                    ports.append(p)
+                    break
+        return ports
 
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, network_info=None, block_device_info=None):
@@ -416,8 +436,7 @@ class IronicDriver(virt_driver.ComputeDriver):
 
         # Set image id, and other driver info so we can pass it down to Ironic
         # use the ironic_driver_fields file to import
-        flavor = flavor_obj.Flavor.get_by_id(context,
-                                             instance['instance_type_id'])
+        flavor = self.virtapi.instance_type_get(context, instance['instance_type_id'])
         self._add_driver_fields(node, instance, image_meta, flavor)
 
         #validate we ready to do the deploy
@@ -540,8 +559,8 @@ class IronicDriver(virt_driver.ComputeDriver):
         timer = loopingcall.FixedIntervalLoopingCall(_wait_for_provision_state)
         timer.start(interval=CONF.ironic.api_retry_interval).wait()
 
-    def destroy(self, context, instance, network_info,
-                block_device_info=None):
+    def destroy(self, instance, network_info,
+                block_device_info=None, context=None):
         icli = self._get_client()
         try:
             node = validate_instance_and_node(icli, instance)
@@ -641,7 +660,7 @@ class IronicDriver(virt_driver.ComputeDriver):
         self._unplug_vifs(node, instance, network_info)
 
         icli = self._get_client()
-        ports = icli.node.list_ports(node.uuid)
+        ports = self._list_ports(node)
 
         if len(network_info) > len(ports):
             raise exception.NovaException(_(
@@ -667,13 +686,14 @@ class IronicDriver(virt_driver.ComputeDriver):
                     msg = (_("Failed to set the VIF networking for port %s")
                            % pif.uuid)
                     raise exception.NovaException(msg)
+                self._register_port_in_janus(vif, pif)
 
     def _unplug_vifs(self, node, instance, network_info):
         LOG.debug(_("unplug: instance_uuid=%(uuid)s vif=%(network_info)s")
                   % {'uuid': instance['uuid'], 'network_info': network_info})
         if network_info and len(network_info) > 0:
             icli = self._get_client()
-            ports = icli.node.list_ports(node.uuid)
+            ports = self._list_ports(node)
 
             # not needed if no vif are defined
             for vif, pif in zip(network_info, ports):
@@ -688,6 +708,65 @@ class IronicDriver(virt_driver.ComputeDriver):
                     LOG.warning(msg)
                 except ironic_exception.HTTPBadRequest:
                     pass
+                self._deregister_port_in_janus(vif, pif)
+
+    def _register_port_in_janus(self, vif, port):
+        if ('datapath_id' not in port.extra or
+            'of_port_no' not in port.extra):
+            return
+
+        datapath_id = port.extra['datapath_id']
+        of_port_no = port.extra['of_port_no']
+        mac_address = vif.get('address', None)
+        migrating = vif.get('migrating', False)
+        net = vif.get('network')
+        subnets = net.get('subnets')
+        network_id = net['id']
+
+        try:
+            self.janus_client.createPort(network_id, datapath_id, of_port_no,
+                                         migrating = migrating)
+            self.janus_client.addMAC(network_id, mac_address)
+            for subnet in subnets:
+                ips = subnet['ips']
+                for ip in ips:
+                    ip_address = ip['address']
+                    self.janus_client.ip_mac_mapping(network_id, datapath_id,
+                                                     mac_address, ip_address,
+                                                     of_port_no,
+                                                     migrating = migrating)
+        except httplib.HTTPException as e:
+            res = e.args[0]
+            if res.status != httplib.CONFLICT:
+                raise
+
+    def _deregister_port_in_janus(self, vif, port):
+        mac_address = vif.get('address', None)
+        net = vif.get('network')
+        subnets = net.get('subnets')
+        network_id = net['id']
+        migrated = vif.get('migrated', False)
+
+        if ('datapath_id' in port.extra and 'of_port_no' in port.extra and
+            migrated is False):
+            try:
+                self.janus_client.deletePort(network_id,
+                                             port.extra['datapath_id'],
+                                             port.extra['of_port_no'])
+            except httplib.HTTPException as e:
+                res = e.args[0]
+                if res.status != httplib.NOT_FOUND:
+                    traceback.print_exc()
+                    raise
+
+        if migrated is False:
+            try:
+                self.janus_client.delMAC(network_id, mac_address)
+            except httplib.HTTPException as e:
+                res = e.args[0]
+                if res.status != httplib.NOT_FOUND:
+                    traceback.print_exc()
+                    raise
 
     def plug_vifs(self, instance, network_info):
         icli = self._get_client()

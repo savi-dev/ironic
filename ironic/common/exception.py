@@ -357,3 +357,6 @@ class VendorPassthruException(IronicException):
 
 class ConfigInvalid(IronicException):
     message = _("Invalid configuration file. %(error_msg)s")
+
+class SNMPFailure(IronicException):
+    message = _("SNMP operation '%(operation)s' failed: %(error)s")
