@@ -64,6 +64,8 @@ opts = [
                default='pxelinux.0'),
     cfg.StrOpt('admin_tenant_name',
                help='Ironic keystone tenant name.'),
+    cfg.StrOpt('auth_region',
+               help='Ironic keystone region name.'),
     cfg.ListOpt('instance_type_extra_specs',
                 default=[],
                 help='A list of additional capabilities corresponding to '
@@ -196,6 +198,7 @@ class IronicDriver(virt_driver.ComputeDriver):
                       'os_password': CONF.ironic.admin_password,
                       'os_auth_url': CONF.ironic.admin_url,
                       'os_tenant_name': CONF.ironic.admin_tenant_name,
+                      'os_region_name': CONF.ironic.auth_region,
                       'os_service_type': 'baremetal',
                       'os_endpoint_type': 'public'}
         else:
