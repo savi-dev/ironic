@@ -22,6 +22,12 @@ from ironic.common import exception
 CONF = cfg.CONF
 acl.register_opts(CONF)
 
+region_opts = [
+    cfg.StrOpt('auth_region',
+               help='Ironic keystone region name.'),
+]
+
+CONF.register_opts(region_opts, group='keystone_authtoken')
 
 def get_service_url(service_type='baremetal', endpoint_type='internal'):
     """Wrapper for get service url from keystone service catalog."""
@@ -59,7 +65,8 @@ def get_service_url(service_type='baremetal', endpoint_type='internal'):
 
     try:
         endpoint = ksclient.service_catalog.url_for(service_type=service_type,
-                                                endpoint_type=endpoint_type)
+                                                endpoint_type=endpoint_type,
+                                                region_name=CONF.keystone_authtoken.auth_region)
     except ksexception.EndpointNotFound:
         raise exception.CatalogNotFound(service_type=service_type,
                                         endpoint_type=endpoint_type)
